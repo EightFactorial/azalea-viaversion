@@ -18,7 +18,8 @@ impl JavaHelper {
     /// Will return `None` if java is not found.
     pub(crate) async fn try_find_java_version() -> anyhow::Result<Option<Version>> {
         Ok(match Command::new("java").arg("-version").output().await {
-            Err(_) => None, /* Java not found */
+            // Java not found
+            Err(_) => None,
             Ok(output) => {
                 let stderr = String::from_utf8(output.stderr).context("UTF-8")?;
                 Some(Self::parse_java_version(&stderr)?)

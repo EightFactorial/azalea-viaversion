@@ -1,19 +1,24 @@
 #![doc = include_str!("../README.md")]
 #![cfg_attr(docsrs, feature(doc_auto_cfg))]
 
-use anyhow::Result;
-use azalea::app::AppExit;
-use azalea::packet::login::{
-    IgnoreQueryIds, LoginPacketEvent, LoginSendPacketQueue, process_packet_events,
+use std::{
+    io::Cursor,
+    net::SocketAddr,
+    process::Stdio,
+    sync::atomic::{AtomicBool, Ordering},
 };
+
 use azalea::{
-    app::{App, Plugin, PreUpdate, Startup},
+    app::{App, AppExit, Plugin, PreUpdate, Startup},
     auth::sessionserver::{
         ClientSessionServerError::{ForbiddenOperation, InvalidSession},
         join_with_server_id_hash,
     },
     buf::AzaleaRead,
     ecs::prelude::*,
+    packet::login::{
+        IgnoreQueryIds, LoginPacketEvent, LoginSendPacketQueue, process_packet_events,
+    },
     prelude::*,
     protocol::{
         ServerAddress,
@@ -23,20 +28,13 @@ use azalea::{
     },
     swarm::Swarm,
 };
-use futures_util::StreamExt;
-use kdam::{BarExt, tqdm};
 use parking_lot::Mutex;
 use reqwest::Client;
-use reqwest::IntoUrl;
 use semver::Version;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::{io::Cursor, net::SocketAddr, path::Path, process::Stdio};
-use tokio::sync::oneshot::Receiver;
-use tokio::sync::oneshot::error::TryRecvError;
 use tokio::{
-    fs::File,
-    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+    io::{AsyncBufReadExt, BufReader},
     process::Command,
+    sync::oneshot::{Receiver, error::TryRecvError},
 };
 use tracing::{error, info, trace};
 
@@ -93,10 +91,10 @@ impl Plugin for ViaVersionPlugin {
 
     fn finish(&self, app: &mut App) {
         if self.should_exit.load(Ordering::Relaxed) {
-            error!("ViaProxy failed to start, exiting...");
+            error!("ViaProxy failed to start, exiting ...");
             app.world_mut().send_event(AppExit::error());
         } else {
-            info!("ViaProxy started successfully");
+            info!("ViaProxy started successfully!");
         }
     }
 }
@@ -105,11 +103,11 @@ impl ViaVersionPlugin {
     /// Download and start a ViaProxy instance.
     ///
     /// # Panics
-    /// Will panic if java fails to parse, files fail to download, or ViaProxy fails to start.
+    /// Will panic if java fails to parse, files fail to download, or ViaProxy
+    /// fails to start.
     pub async fn start(mc_version: impl ToString) -> Self {
-        let Some(java_version) = JavaHelper::try_find_java_version()
-            .await
-            .expect("Failed to parse")
+        let Some(java_version) =
+            JavaHelper::try_find_java_version().await.expect("Failed to parse")
         else {
             panic!(
                 "Java installation not found! Please download Java from {JAVA_DOWNLOAD_URL} or use your system's package manager."
@@ -126,7 +124,7 @@ impl ViaVersionPlugin {
         let via_proxy_url = format!(
             "https://github.com/ViaVersion/ViaProxy/releases/download/v{VIA_PROXY_VERSION}/{via_proxy_name}"
         );
-        try_download_file(via_proxy_url, &via_proxy_path, &via_proxy_name)
+        ViaVersionHelper::try_download_file(via_proxy_url, &via_proxy_path, &via_proxy_name)
             .await
             .expect("Failed to download ViaProxy");
 
@@ -135,17 +133,15 @@ impl ViaVersionPlugin {
         let via_oauth_url = format!(
             "https://github.com/ViaVersionAddons/ViaProxyOpenAuthMod/releases/download/v{VIA_OAUTH_VERSION}/{via_oauth_name}"
         );
-        try_download_file(via_oauth_url, &via_oauth_path, &via_oauth_name)
+        ViaVersionHelper::try_download_file(via_oauth_url, &via_oauth_path, &via_oauth_name)
             .await
             .expect("Failed to download ViaProxyOpenAuthMod");
 
-        let bind_addr = ViaVersionHelper::try_find_free_addr()
-            .await
-            .expect("Failed to bind");
+        let bind_addr = ViaVersionHelper::try_find_free_addr().await.expect("Failed to bind");
         let mut child = Command::new("java")
-            /* Java Args */
+            // Java Args
             .args(["-jar", &via_proxy_name])
-            /* ViaProxy Args */
+            // ViaProxy Args
             .arg("cli")
             .args(["--auth-method", "OPENAUTHMOD"])
             .args(["--bind-address", &bind_addr.to_string()])
@@ -184,10 +180,7 @@ impl ViaVersionPlugin {
         Self {
             receiver: Mutex::new(rx),
             should_exit: AtomicBool::new(false),
-            settings: ViaVersionSettings {
-                version: mc_version,
-                socket: bind_addr,
-            },
+            settings: ViaVersionSettings { version: mc_version, socket: bind_addr },
         }
     }
 
@@ -195,8 +188,8 @@ impl ViaVersionPlugin {
     pub fn handle_change_address(plugin: Res<ViaVersionSettings>, swarm: Res<Swarm>) {
         let ServerAddress { host, port } = swarm.address.read().clone();
 
-        // sadly, the first part of the resolved address is unused as viaproxy will resolve it on its own
-        // more info: https://github.com/ViaVersion/ViaProxy/issues/338
+        // sadly, the first part of the resolved address is unused as viaproxy will
+        // resolve it on its own more info: https://github.com/ViaVersion/ViaProxy/issues/338
         let data_after_null_byte = host.split_once('\x07').map(|(_, data)| data);
 
         let mut connection_host = format!("localhost\x07{host}\x07{}", plugin.version);
@@ -205,12 +198,9 @@ impl ViaVersionPlugin {
             connection_host.push_str(data);
         }
 
-        *swarm.address.write() = ServerAddress {
-            port,
-            host: connection_host,
-        };
+        *swarm.address.write() = ServerAddress { port, host: connection_host };
 
-        /* Must wait to be written until after reading above */
+        // Must wait to be written until after reading above
         *swarm.resolved_address.write() = plugin.socket;
     }
 
@@ -254,20 +244,20 @@ impl ViaVersionPlugin {
 
             let _handle = tokio::spawn(async move {
                 let result = match join_with_server_id_hash(&client, &token, &uuid, &hash).await {
-                    Ok(()) => Ok(()), /* Successfully Authenticated */
+                    Ok(()) => Ok(()), // Successfully Authenticated
                     Err(InvalidSession | ForbiddenOperation) => {
                         if let Err(error) = account.refresh().await {
                             error!("Failed to refresh account: {error}");
                             return;
                         }
 
-                        /* Retry after refreshing */
+                        // Retry after refreshing
                         join_with_server_id_hash(&client, &token, &uuid, &hash).await
                     }
                     Err(error) => Err(error),
                 };
 
-                /* Send directly instead of SendLoginPacketEvent because of lifetimes */
+                // Send directly instead of SendLoginPacketEvent because of lifetimes
                 let _ = tx.send(ServerboundLoginPacket::CustomQueryAnswer(
                     ServerboundCustomQueryAnswer {
                         transaction_id,
@@ -277,44 +267,4 @@ impl ViaVersionPlugin {
             });
         }
     }
-}
-
-/// Try to download and save a file if it doesn't exist.
-///
-/// # Errors
-/// Will return `Err` if the file fails to download or save.
-async fn try_download_file<U, P>(url: U, dir: P, file: &str) -> Result<()>
-where
-    U: IntoUrl + Send + Sync,
-    P: AsRef<Path> + Send + Sync,
-{
-    tokio::fs::create_dir_all(&dir).await?;
-    let path = dir.as_ref().join(file);
-    if path.exists() {
-        return Ok(());
-    }
-
-    let response = reqwest::get(url).await?;
-    let mut pb = tqdm!(
-        total = usize::try_from(response.content_length().unwrap_or(0))?,
-        unit_scale = true,
-        unit_divisor = 1024,
-        unit = "B",
-        force_refresh = true
-    );
-
-    pb.write(format!("Downloading {file}"))?;
-
-    let mut file = File::create(path).await?;
-    let mut stream = response.bytes_stream();
-
-    while let Some(item) = stream.next().await {
-        let chunk = item?;
-        file.write_all(&chunk).await?;
-        pb.update(chunk.len())?;
-    }
-
-    pb.refresh()?;
-
-    Ok(())
 }
