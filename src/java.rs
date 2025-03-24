@@ -12,22 +12,14 @@ impl JavaHelper {
     /// This uses `-version` and `stderr`, because it's backwards compatible.
     ///
     /// # Errors
-    /// Will return `Err` if `Version::parse` fails.
-    ///
-    /// # Options
-    /// Will return `None` if java is not found.
-    pub(crate) async fn try_find_java_version() -> anyhow::Result<Option<Version>> {
-        Ok(match Command::new("java").arg("-version").output().await {
-            // Java not found
-            Err(_) => None,
-            Ok(output) => {
-                let stderr = String::from_utf8(output.stderr).context("UTF-8")?;
-                Some(Self::parse_java_version(&stderr)?)
-            }
-        })
+    /// Returns an error if the "java" command is not found,
+    /// or if the version cannot be parsed.
+    pub(crate) async fn java_version() -> anyhow::Result<Version> {
+        let output = Command::new("java").arg("-version").output().await?;
+        Self::parse_version(str::from_utf8(&output.stderr)?)
     }
 
-    fn parse_java_version(stderr: &str) -> anyhow::Result<Version> {
+    fn parse_version(stderr: &str) -> anyhow::Result<Version> {
         // whole, first group, second group
         let (_, major, mut minor_patch) =
             regex_captures!(r"(\d+)(\.\d+\.\d+)?", stderr).context("Regex")?;
@@ -46,7 +38,7 @@ fn test_parse_openjdk_ea() {
 OpenJDK Runtime Environment (build 24-ea+29-3578)
 OpenJDK 64-Bit Server VM (build 24-ea+29-3578, mixed mode, sharing)"
         .to_string();
-    let version = JavaHelper::parse_java_version(&stderr).unwrap();
+    let version = JavaHelper::parse_version(&stderr).unwrap();
     assert_eq!(version, Version::new(24, 0, 0));
 }
 
@@ -56,7 +48,7 @@ fn test_parse_openjdk_8() {
 OpenJDK Runtime Environment (build 1.8.0_432-b05)
 OpenJDK 64-Bit Server VM (build 25.432-b05, mixed mode)"
         .to_string();
-    let version = JavaHelper::parse_java_version(&stderr).unwrap();
+    let version = JavaHelper::parse_version(&stderr).unwrap();
     assert_eq!(version, Version::new(1, 8, 0));
 }
 
@@ -66,6 +58,6 @@ fn test_parse_openjdk_11() {
 OpenJDK Runtime Environment (build 11.0.25+9)
 OpenJDK 64-Bit Server VM (build 11.0.25+9, mixed mode)"
         .to_string();
-    let version = JavaHelper::parse_java_version(&stderr).unwrap();
+    let version = JavaHelper::parse_version(&stderr).unwrap();
     assert_eq!(version, Version::new(11, 0, 25));
 }

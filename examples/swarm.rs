@@ -9,7 +9,7 @@ async fn main() {
     tracing_subscriber::fmt::init();
 
     // Initialize a 1.21.4 ViaProxy instance
-    let plugin = ViaVersionPlugin::start("1.21.4").await;
+    let plugin = ViaVersionPlugin::start("1.21.4").await.unwrap();
     // Create a SwarmBuilder and add the ViaVersion plugin
     let builder = SwarmBuilder::new().add_plugins(plugin);
 

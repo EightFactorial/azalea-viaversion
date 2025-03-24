@@ -4,6 +4,7 @@
 use std::{
     io::Cursor,
     net::SocketAddr,
+    path::Path,
     process::Stdio,
     sync::atomic::{AtomicBool, Ordering},
 };
@@ -76,7 +77,7 @@ impl Plugin for ViaVersionPlugin {
 
     fn ready(&self, _: &App) -> bool {
         match self.receiver.lock().try_recv() {
-            // Result is `Ok` or already received
+            // Received `Ok` or already received
             Ok(Ok(())) | Err(TryRecvError::Closed) => true,
             // Received an `Err`
             Ok(Err(err)) => {
@@ -102,20 +103,39 @@ impl Plugin for ViaVersionPlugin {
 impl ViaVersionPlugin {
     /// Download and start a ViaProxy instance.
     ///
+    /// # Errors
+    /// Returns an error if java fails to parse.
+    ///
     /// # Panics
-    /// Will panic if java fails to parse, files fail to download, or ViaProxy
-    /// fails to start.
-    pub async fn start(mc_version: impl ToString) -> Self {
-        let Some(java_version) =
-            JavaHelper::try_find_java_version().await.expect("Failed to parse")
-        else {
-            panic!(
-                "Java installation not found! Please download Java from {JAVA_DOWNLOAD_URL} or use your system's package manager."
-            );
+    /// Panics if files fail to download or ViaProxy fails to start.
+    pub async fn start(mc_version: impl ToString) -> anyhow::Result<Self> {
+        match minecraft_folder_path::minecraft_dir() {
+            Some(mc_path) => Self::start_using(mc_version, &mc_path).await,
+            None => anyhow::bail!("Failed to find Minecraft directory, unsupported platform!"),
+        }
+    }
+
+    /// Download and start a ViaProxy instance.
+    ///
+    /// Uses the provided directory for storing ViaProxy files.
+    ///
+    /// # Errors
+    /// Returns an error if java fails to parse.
+    ///
+    /// # Panics
+    /// Panics if files fail to download or ViaProxy fails to start.
+    pub async fn start_using(mc_version: impl ToString, mc_path: &Path) -> anyhow::Result<Self> {
+        let java_version = match JavaHelper::java_version().await {
+            Ok(version) => version,
+            Err(err) => {
+                error!("Failed to get Java version: {err}");
+                anyhow::bail!(
+                    "Java installation not found! Please download Java from {JAVA_DOWNLOAD_URL} or use your system's package manager"
+                );
+            }
         };
 
         let mc_version = mc_version.to_string();
-        let mc_path = minecraft_folder_path::minecraft_dir().expect("Unsupported Platform");
 
         #[rustfmt::skip]
         let via_proxy_ext = if java_version.major < 17 { "+java8.jar" } else { ".jar" };
@@ -167,7 +187,12 @@ impl ViaVersionPlugin {
                 if !line.is_empty() {
                     trace!("{}", line.trim());
 
-                    if line.contains("Finished mapping loading") {
+                    if line.contains("Disabled plugin 'OpenAuthModPlugin'") {
+                        if tx.send(Err(anyhow::anyhow!("OpenAuthModPlugin is disabled"))).is_err() {
+                            error!("Failed to signal main thread!");
+                        }
+                        return;
+                    } else if line.contains("Finished mapping loading") {
                         if tx.send(Ok(())).is_err() {
                             error!("Failed to signal main thread!");
                         }
@@ -177,11 +202,11 @@ impl ViaVersionPlugin {
             }
         });
 
-        Self {
+        Ok(Self {
             receiver: Mutex::new(rx),
             should_exit: AtomicBool::new(false),
             settings: ViaVersionSettings { version: mc_version, socket: bind_addr },
-        }
+        })
     }
 
     /// TODO: Documentation

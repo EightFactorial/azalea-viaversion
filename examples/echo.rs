@@ -5,20 +5,20 @@
 //! does not use it.
 #![feature(never_type)]
 
-use azalea::{NoState, StartError, prelude::*};
+use azalea::{NoState, prelude::*};
 use azalea_viaversion::ViaVersionPlugin;
 
 #[tokio::main]
-async fn main() -> Result<!, StartError> {
+async fn main() -> anyhow::Result<!> {
     tracing_subscriber::fmt::init();
 
     // Initialize a 1.21.4 ViaProxy instance
-    let plugin = ViaVersionPlugin::start("1.21.4").await;
+    let plugin = ViaVersionPlugin::start("1.21.4").await?;
     let builder = ClientBuilder::new().add_plugins(plugin);
 
     // Start the client and connect to a localhost server
     let acc = Account::offline("Azalea");
-    builder.set_handler(handle).start(acc, "localhost").await
+    builder.set_handler(handle).start(acc, "localhost").await?
 }
 
 /// A simple event handler that repeats chat messages sent by other players.
