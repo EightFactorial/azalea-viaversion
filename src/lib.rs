@@ -1,13 +1,7 @@
 #![doc = include_str!("../README.md")]
 #![cfg_attr(docsrs, feature(doc_auto_cfg))]
 
-use std::{
-    io::Cursor,
-    net::SocketAddr,
-    path::Path,
-    process::Stdio,
-    sync::atomic::{AtomicBool, Ordering},
-};
+use std::{io::Cursor, net::SocketAddr, path::Path, process::Stdio};
 
 use azalea::{
     app::{App, AppExit, Plugin, PreUpdate, Startup},
@@ -53,8 +47,8 @@ const VIA_PROXY_VERSION: Version = Version::new(3, 3, 7);
 pub struct ViaVersionPlugin {
     /// The receiver for the `ViaProxy` process.
     receiver: Mutex<Receiver<anyhow::Result<()>>>,
-    /// Whether the plugin should close the app.
-    should_exit: AtomicBool,
+    /// The result of starting `ViaProxy`.
+    task_result: Mutex<Option<anyhow::Result<()>>>,
     /// The plugin settings.
     settings: ViaVersionSettings,
 }
@@ -76,26 +70,52 @@ impl Plugin for ViaVersionPlugin {
     }
 
     fn ready(&self, _: &App) -> bool {
-        match self.receiver.lock().try_recv() {
-            // Received `Ok` or already received
-            Ok(Ok(())) | Err(TryRecvError::Closed) => true,
-            // Received an `Err`
-            Ok(Err(err)) => {
-                error!("Failed to start ViaProxy: {err}");
-                self.should_exit.store(true, Ordering::Relaxed);
-                true
-            }
-            // Waiting for result
-            Err(TryRecvError::Empty) => false,
-        }
+        self.poll_task();
+        self.is_finished()
     }
 
     fn finish(&self, app: &mut App) {
-        if self.should_exit.load(Ordering::Relaxed) {
+        if self.task_result.lock().as_ref().is_none_or(Result::is_err) {
             error!("ViaProxy failed to start, exiting ...");
             app.world_mut().send_event(AppExit::error());
         } else {
             info!("ViaProxy started successfully!");
+        }
+    }
+}
+
+impl ViaVersionPlugin {
+    /// Get the result of starting `ViaProxy`.
+    ///
+    /// The option is `None` if the task is still running.
+    #[must_use]
+    pub const fn result(&self) -> &Mutex<Option<anyhow::Result<()>>> { &self.task_result }
+
+    /// Returns `true` if the task has finished starting.
+    #[must_use]
+    pub fn is_finished(&self) -> bool { self.task_result.lock().is_some() }
+
+    /// Poll the `ViaProxy` task receiver.
+    ///
+    /// Returns `true` if the task has finished.
+    fn poll_task(&self) {
+        // Already finished, skip polling the receiver
+        #[rustfmt::skip]
+        if self.is_finished() { return };
+
+        // Poll the receiver for the result
+        match self.receiver.lock().try_recv() {
+            // Received `Ok` or already received
+            Ok(Ok(())) | Err(TryRecvError::Closed) => {
+                self.task_result.lock().replace(Ok(()));
+            }
+            // Received an `Err`
+            Ok(Err(err)) => {
+                error!("Failed to start ViaProxy: {err}");
+                self.task_result.lock().replace(Err(err));
+            }
+            // Waiting for result
+            Err(TryRecvError::Empty) => {}
         }
     }
 }
@@ -158,55 +178,72 @@ impl ViaVersionPlugin {
             .expect("Failed to download ViaProxyOpenAuthMod");
 
         let bind_addr = ViaVersionHelper::try_find_free_addr().await.expect("Failed to bind");
-        let mut child = Command::new("java")
-            // Java Args
-            .args(["-jar", &via_proxy_name])
-            // ViaProxy Args
-            .arg("cli")
-            .args(["--auth-method", "OPENAUTHMOD"])
-            .args(["--bind-address", &bind_addr.to_string()])
-            .args(["--target-address", "127.0.0.1:0"])
-            .args(["--target-version", &mc_version])
-            .args(["--wildcard-domain-handling", "INTERNAL"])
-            .current_dir(via_proxy_path)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .expect("Failed to spawn");
 
         let (tx, rx) = tokio::sync::oneshot::channel();
+        let task_version = mc_version.clone();
         tokio::spawn(async move {
-            let mut stdout = child.stdout.as_mut().expect("Failed to get stdout");
-            let mut reader = BufReader::new(&mut stdout);
-            let mut line = String::new();
-
-            loop {
-                line.clear();
-                reader.read_line(&mut line).await.expect("Failed to read");
-
-                if !line.is_empty() {
-                    trace!("{}", line.trim());
-
-                    if line.contains("Disabled plugin 'OpenAuthModPlugin'") {
-                        if tx.send(Err(anyhow::anyhow!("OpenAuthModPlugin is disabled"))).is_err() {
-                            error!("Failed to signal main thread!");
-                        }
-                        return;
-                    } else if line.contains("Finished mapping loading") {
-                        if tx.send(Ok(())).is_err() {
-                            error!("Failed to signal main thread!");
-                        }
-                        return;
-                    }
-                }
+            let result = Self::start_viaproxy(
+                &via_proxy_name,
+                &via_proxy_path,
+                &bind_addr.to_string(),
+                &task_version,
+            )
+            .await;
+            match tx.send(result) {
+                Ok(()) => {}
+                Err(Ok(())) => error!("Failed to transmit `Ok`"),
+                Err(Err(err)) => error!("Failed to transmit `Err`: \"{err}\""),
             }
         });
 
         Ok(Self {
             receiver: Mutex::new(rx),
-            should_exit: AtomicBool::new(false),
+            task_result: Mutex::new(None),
             settings: ViaVersionSettings { version: mc_version, socket: bind_addr },
         })
+    }
+
+    /// Start a `ViaProxy` instance.
+    async fn start_viaproxy(
+        proxy_name: &str,
+        proxy_path: &Path,
+        bind_addr: &str,
+        mc_version: &str,
+    ) -> anyhow::Result<()> {
+        let mut child = Command::new("java")
+            // Java Args
+            .arg("-jar")
+            .arg(proxy_path.join(proxy_name))
+            // ViaProxy Args
+            .arg("cli")
+            .args(["--auth-method", "OPENAUTHMOD"])
+            .args(["--bind-address", bind_addr])
+            .args(["--target-address", "127.0.0.1:0"])
+            .args(["--target-version", mc_version])
+            .args(["--wildcard-domain-handling", "INTERNAL"])
+            .current_dir(proxy_path)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()?;
+
+        let mut stdout = child.stdout.as_mut().expect("Failed to get stdout");
+        let mut reader = BufReader::new(&mut stdout);
+        let mut line = String::new();
+
+        loop {
+            line.clear();
+            reader.read_line(&mut line).await?;
+
+            if !line.is_empty() {
+                trace!("{}", line.trim());
+
+                if line.contains("Disabled plugin 'OpenAuthModPlugin'") {
+                    return Err(anyhow::anyhow!("OpenAuthModPlugin is disabled"));
+                } else if line.contains("Finished mapping loading") {
+                    return Ok(());
+                }
+            }
+        }
     }
 
     /// TODO: Documentation
